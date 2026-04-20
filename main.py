@@ -1,208 +1,217 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Solarpotenzialanalyse Hamburger Hafen - mit Debugging und Timestamps
+Solarpotenzialanalyse Hamburger Hafen – WFS-Version
+Daten direkt vom WFS Solarpotenzialflächen Hamburg
 """
 
-import os
-import glob
-import zipfile
-import tempfile
-import webbrowser
-from datetime import datetime
 import geopandas as gpd
 import folium
+import webbrowser
+import requests
+import locale
+from datetime import datetime
+import os
+# -------------------------------
+# Deutsches Zahlenformat
+# -------------------------------
+try:
+    locale.setlocale(locale.LC_ALL, 'de_DE.UTF-8')
+except:
+    try:
+        locale.setlocale(locale.LC_ALL, 'German_Germany.1252')
+    except:
+        locale.setlocale(locale.LC_ALL, '')
 
-# ============================================================
-# LOGGING MIT TIMESTAMP
-# ============================================================
-def ts(format_str: str = "[%H:%M:%S]") -> str:
-    return datetime.now().strftime(format_str)
+def fmt_zahl(zahl, stellen=0):
+    if zahl is None:
+        return 'k.A.'
+    if stellen == 0:
+        return locale.format_string("%d", int(round(zahl)), grouping=True)
+    return locale.format_string(f"%.{stellen}f", zahl, grouping=True)
 
-def log(msg, level="INFO"):
-    print(f"{ts()} {level:5} {msg}")
+def ts():
+    return datetime.now().strftime("[%H:%M:%S]")
 
-# ============================================================
-# HILFSFUNKTIONEN
-# ============================================================
-def finde_solar_zip(verzeichnis="."):
-    """Sucht automatisch nach der Solar-ZIP (case-insensitiv)."""
-    pattern = "*solar*.zip"
-    treffer = glob.glob(os.path.join(verzeichnis, pattern))
-    if treffer:
-        return treffer[0]
-    # Fallback: alle ZIPs auflisten
-    alle_zips = glob.glob(os.path.join(verzeichnis, "*.zip"))
-    log(f"Keine Solar-ZIP gefunden. Verfügbare ZIPs: {alle_zips}", "WARN")
+def log(msg):
+    print(f"{ts()} {msg}")
+
+# -------------------------------
+# Hauptprogramm
+# -------------------------------
+log("Starte Solarpotenzialanalyse Hafen")
+
+# 1. Hafengebiet laden
+log("Lade Hafengebiet...")
+hafen = gpd.read_file("zip://hafengebietsgrenzen_json.zip!app_hafengebietsgrenzen_EPSG_25832.json")
+hafen = hafen.set_crs(25832, allow_override=True)
+log(f"Hafengebiet geladen: {len(hafen)} Polygon(e)")
+
+# BBOX des Hafengebiets für WFS-Filter
+bounds = hafen.total_bounds  # (minx, miny, maxx, maxy) in EPSG:25832
+bbox_str = f"{bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]},urn:ogc:def:crs:EPSG::25832"
+log(f"BBOX: {bounds}")
+
+# 2. WFS-Abfrage: Dachseiten im Hafengebiet
+WFS_URL = "https://geodienste.hamburg.de/wfs_solarpotenzialanalyse"
+
+def wfs_get(typename, bbox):
+    params = {
+        "SERVICE": "WFS",
+        "VERSION": "1.1.0",
+        "REQUEST": "GetFeature",
+        "typename": typename,
+        "BBOX": bbox,
+    }
+    log(f"Rufe WFS ab: {typename} ...")
+    r = requests.get(WFS_URL, params=params, timeout=120)
+    r.raise_for_status()
+    import io
+    return gpd.read_file(io.BytesIO(r.content))
+def excel_dateiname(basis="hafen_solar_dachseiten.xlsx"):
+    if not os.path.exists(basis):
+        return basis
+    name, ext = os.path.splitext(basis)
+    i = 1
+    while os.path.exists(f"{name} ({i}){ext}"):
+        i += 1
+    return f"{name} ({i}){ext}"
+try:
+    CACHE_FILE = "dachseiten_cache.gpkg"
+
+    if os.path.exists(CACHE_FILE):
+        log(f"Lade aus Cache: {CACHE_FILE}")
+        dachseiten = gpd.read_file(CACHE_FILE)
+    else:
+        dachseiten = wfs_get("de.hh.up:dachseiten", bbox_str)
+        log(f"Dachseiten geladen: {fmt_zahl(len(dachseiten))}")
+        log("Speichere Cache...")
+        dachseiten.to_file(CACHE_FILE, driver="GPKG")
+        log("Cache gespeichert.")
+except Exception as e:
+    log(f"Fehler beim WFS-Abruf: {e}")
+    exit(1)
+
+if len(dachseiten) == 0:
+    log("Keine Dachseiten im Hafengebiet gefunden.")
+    exit(0)
+
+# CRS sicherstellen
+if dachseiten.crs is None:
+    dachseiten = dachseiten.set_crs(25832)
+elif dachseiten.crs.to_epsg() != 25832:
+    dachseiten = dachseiten.to_crs(25832)
+# Geometrien bereinigen
+log("Bereinige Geometrien...")
+dachseiten.geometry = dachseiten.geometry.buffer(0)
+hafen.geometry = hafen.geometry.buffer(0)
+# 3. Räumlicher Clip auf Hafengebiet
+log("Clippe auf Hafengebiet...")
+dachseiten_hafen = gpd.clip(dachseiten, hafen)
+log(f"Dachseiten nach Clip: {fmt_zahl(len(dachseiten_hafen))}")
+
+# 4. Spalten ausgeben (zur Orientierung)
+log(f"Verfügbare Spalten: {list(dachseiten_hafen.columns)}")
+
+# 5. Statistiken (Spaltennamen ggf. anpassen nach erstem Lauf)
+# Typische Spalten laut Metadaten: Flaeche_PV, Ertrag_ohneAufstd, Eignung_PV
+def col(gdf, *candidates):
+    """Ersten gefundenen Spaltennamen zurückgeben."""
+    for c in candidates:
+        for col in gdf.columns:
+            if col.lower() == c.lower():
+                return col
     return None
 
-def lade_hafengebiet(pfad_zip="hafengebietsgrenzen_json.zip",
-                     datei_in_zip="app_hafengebietsgrenzen_EPSG_25832.json"):
-    voller_pfad = f"zip://{pfad_zip}!{datei_in_zip}"
-    hafen = gpd.read_file(voller_pfad)
-    hafen = hafen.set_crs(25832, allow_override=True)
-    log(f"Hafengebiet geladen: {len(hafen)} Polygon(e)")
-    return hafen
+col_pv   = col(dachseiten_hafen, 'pvarea')
+col_ert  = col(dachseiten_hafen, 'ertkwha_k')
+col_eig  = col(dachseiten_hafen, 'eignung')
+FARBEN_DACHSEITEN = {
+    1: '#d73027',  # rot       – sehr hohe Einstrahlung
+    2: '#f46d43',  # orange-rot
+    3: '#fdae61',  # orange
+    6: '#fee090',  # gelb
+    0: '#e0e0e0',  # grau      – Datenqualität unzureichend
+    8: '#f0f0f0',  # hellgrau  – kein Gebäude
+}
+pv_summe     = dachseiten_hafen[col_pv].sum()  if col_pv  else None
+ertrag_summe = dachseiten_hafen[col_ert].sum() if col_ert else None
+leistung_mwp = (pv_summe * 0.175 / 1000)       if pv_summe else None
+ertrag_gwh   = (ertrag_summe / 1_000_000)       if ertrag_summe else None
 
-def lade_solar_daten(zip_pfad):
-    """Entpackt ZIP und lädt Gebäude & Dachseiten (25832 und 4326)."""
-    ergebnis = {}
-    with tempfile.TemporaryDirectory() as tmpdir:
-        with zipfile.ZipFile(zip_pfad, 'r') as zf:
-            zf.extractall(tmpdir)
-            log(f"{zip_pfad} enthält {len(zf.namelist())} Dateien")
+log(f"PV-Fläche gesamt:  {fmt_zahl(pv_summe)} m²")
+log(f"Ertrag gesamt:     {fmt_zahl(ertrag_summe)} kWh/a")
+log(f"Leistung (ca.):    {fmt_zahl(leistung_mwp, 1)} MWp")
+log(f"Ertrag (ca.):      {fmt_zahl(ertrag_gwh, 1)} GWh/a")
 
-        # Alle JSON-Dateien finden
-        json_files = []
-        for root, dirs, files in os.walk(tmpdir):
-            for f in files:
-                if f.endswith('.json'):
-                    json_files.append(os.path.join(root, f))
+# 6. Karte
+log("Erstelle Karte...")
+centroid = hafen.geometry.centroid.to_crs(4326)
+center = [centroid.y.mean(), centroid.x.mean()]
 
-        gdf_geb = gdf_geb_wgs = gdf_dach = gdf_dach_wgs = None
-        for pfad in json_files:
-            name = os.path.basename(pfad)
-            if 'gebaeude' in name.lower():
-                if '25832' in pfad:
-                    gdf_geb = gpd.read_file(pfad)
-                    log(f"Gebäude (25832): {len(gdf_geb):,} Objekte")
-                elif '4326' in pfad:
-                    gdf_geb_wgs = gpd.read_file(pfad)
-                    log(f"Gebäude (4326): {len(gdf_geb_wgs):,} Objekte")
-            elif 'dachseiten' in name.lower():
-                if '25832' in pfad:
-                    gdf_dach = gpd.read_file(pfad)
-                    log(f"Dachseiten (25832): {len(gdf_dach):,} Objekte")
-                elif '4326' in pfad:
-                    gdf_dach_wgs = gpd.read_file(pfad)
-                    log(f"Dachseiten (4326): {len(gdf_dach_wgs):,} Objekte")
+hafen_wgs      = hafen.to_crs(4326)
+dachseiten_wgs = dachseiten_hafen.to_crs(4326)
 
-        # Notfalls konvertieren
-        if gdf_geb is not None and gdf_geb_wgs is None:
-            gdf_geb_wgs = gdf_geb.to_crs(4326)
-            log("Gebäude nach WGS84 konvertiert")
-        if gdf_dach is not None and gdf_dach_wgs is None:
-            gdf_dach_wgs = gdf_dach.to_crs(4326)
-            log("Dachseiten nach WGS84 konvertiert")
+m = folium.Map(location=center, zoom_start=14, tiles='CartoDB positron')
 
-        ergebnis['gebaeude'] = gdf_geb
-        ergebnis['gebaeude_wgs'] = gdf_geb_wgs
-        ergebnis['dachseiten'] = gdf_dach
-        ergebnis['dachseiten_wgs'] = gdf_dach_wgs
-    return ergebnis
+folium.GeoJson(
+    hafen_wgs,
+    name="Hafengrenze",
+    style_function=lambda x: {"color": "blue", "weight": 2, "fillOpacity": 0.05}
+).add_to(m)
 
-# ============================================================
-# DEBUG: RÄUMLICHE ÜBERLAPPUNG PRÜFEN
-# ============================================================
-def debug_ueberlappung(hafen, solar_gdf, name):
-    """Prüft BBoxen, führt sjoin durch und gibt Anzahl Schnitte aus."""
-    if solar_gdf is None or len(solar_gdf) == 0:
-        log(f"{name}: Keine Daten", "WARN")
-        return
+# Einfärbung nach Eignung (1=grün … 8=rot) falls Spalte vorhanden
+def farbe_dachseite(feature):
+    v = feature['properties'].get('eignung', '')
+    try:
+        # "Eignung 1 (geeignet, sehr hohe Einstrahlung)" → 1
+        v = int(str(v).split()[1])
+    except:
+        v = 0
+    return {
+        "color": FARBEN_DACHSEITEN.get(v, '#cccccc'),
+        "weight": 0.5,
+        "fillOpacity": 0.8
+    }
 
-    # CRS angleichen
-    if solar_gdf.crs != hafen.crs:
-        solar_gdf = solar_gdf.to_crs(hafen.crs)
-        log(f"{name}: CRS an Hafengebiet angepasst")
+folium.GeoJson(
+    dachseiten_wgs,
+    name=f"Dachseiten ({fmt_zahl(len(dachseiten_wgs))})",
+    style_function=farbe_dachseite,
+    tooltip=folium.GeoJsonTooltip(
+        fields=[c for c in [col_pv, col_ert, col_eig] if c],
+        aliases=["PV-Fläche [m²]", "Ertrag [kWh/a]", "Eignung PV"][:sum(1 for c in [col_pv, col_ert, col_eig] if c)]
+    ) if any([col_pv, col_ert, col_eig]) else None
+).add_to(m)
 
-    # Bounding Boxes
-    hafen_bbox = hafen.total_bounds
-    solar_bbox = solar_gdf.total_bounds
-    log(f"Hafen   BBox: [{hafen_bbox[0]:.1f}, {hafen_bbox[1]:.1f}, {hafen_bbox[2]:.1f}, {hafen_bbox[3]:.1f}]")
-    log(f"{name} BBox: [{solar_bbox[0]:.1f}, {solar_bbox[1]:.1f}, {solar_bbox[2]:.1f}, {solar_bbox[3]:.1f}]")
-
-    # Überlappung der BBoxen?
-    ueberlappt = not (hafen_bbox[2] < solar_bbox[0] or hafen_bbox[0] > solar_bbox[2] or
-                      hafen_bbox[3] < solar_bbox[1] or hafen_bbox[1] > solar_bbox[3])
-    log(f"Bounding Boxen überlappen: {ueberlappt}")
-
-    if ueberlappt:
-        # Räumlicher Join mit intersects
-        join = gpd.sjoin(solar_gdf, hafen, predicate='intersects')
-        log(f"Anzahl {name} mit intersects: {len(join)}")
-        if len(join) == 0:
-            # Test mit 10m Puffer
-            hafen_puff = hafen.copy()
-            hafen_puff.geometry = hafen_puff.geometry.buffer(10)
-            join_puff = gpd.sjoin(solar_gdf, hafen_puff, predicate='intersects')
-            log(f"Mit 10m Puffer: {len(join_puff)} Schnitte")
-    else:
-        log(f"Keine Überlappung der BBoxen – möglicherweise falsches CRS oder Daten außerhalb", "WARN")
-
-def testkarte_mit_rohdaten(hafen_wgs, solar_wgs, name="Solarflächen"):
-    """Erstellt eine Karte mit Hafengrenze und einer Stichprobe der Solardaten."""
-    zentrum = [hafen_wgs.geometry.centroid.y.mean(), hafen_wgs.geometry.centroid.x.mean()]
-    m = folium.Map(location=zentrum, zoom_start=12, tiles='CartoDB positron')
-    folium.GeoJson(hafen_wgs, name="Hafengebiet", style_function=lambda x: {"color": "blue", "fillOpacity": 0.1}).add_to(m)
-    if solar_wgs is not None and len(solar_wgs) > 0:
-        sample = solar_wgs.head(1000)
-        folium.GeoJson(sample, name=name, style_function=lambda x: {"color": "red", "weight": 1, "fillOpacity": 0.3}).add_to(m)
-    folium.LayerControl().add_to(m)
-    out = "test_overlap.html"
-    m.save(out)
-    webbrowser.open(out)
-    log(f"Testkarte mit Rohdaten gespeichert: {out}")
-
-# ============================================================
-# VERSCHNEIDUNG (OVERLAY)
-# ============================================================
-def verschneide_mit_hafen(gdf, hafen_gdf, name="Objekte"):
-    if gdf is None or len(gdf) == 0:
-        return None
-    if gdf.crs != hafen_gdf.crs:
-        gdf = gdf.to_crs(hafen_gdf.crs)
-    overlay = gpd.overlay(gdf, hafen_gdf, how='intersection')
-    log(f"Overlay {name}: {len(overlay)} Objekte im Hafen")
-    return overlay
-
-# ============================================================
-# HAUPTABLAUF
-# ============================================================
-def main():
-    log("Start Solarpotenzialanalyse Hafen", "INFO")
-
-    # 1. Hafen laden
-    hafen = lade_hafengebiet()
-    hafen_wgs = hafen.to_crs(4326)
-
-    # 2. Solar-ZIP finden
-    zip_pfad = finde_solar_zip()
-    if not zip_pfad:
-        log("Keine Solar-ZIP gefunden. Abbruch.", "ERROR")
-        return
-    log(f"Solar-ZIP: {zip_pfad}")
-
-    # 3. Solardaten laden
-    solar = lade_solar_daten(zip_pfad)
-    if solar.get('gebaeude') is None:
-        log("Keine Gebäudedaten in ZIP.", "ERROR")
-        return
-
-    # 4. Debug: Räumliche Überprüfung
-    log("\n--- Räumliche Überprüfung (Gebäude) ---")
-    debug_ueberlappung(hafen, solar['gebaeude'], "Gebäude")
-    if solar.get('dachseiten') is not None:
-        log("\n--- Räumliche Überprüfung (Dachseiten) ---")
-        debug_ueberlappung(hafen, solar['dachseiten'], "Dachseiten")
-
-    # 5. Testkarte mit Rohdaten (nur Hafengrenze + Stichprobe Solar)
-    log("\n--- Erstelle Testkarte für visuelle Prüfung ---")
-    testkarte_mit_rohdaten(hafen_wgs, solar['gebaeude_wgs'], "Gebäude (erste 1000)")
-
-    # 6. Eigentliche Verschneidung (overlay)
-    geb_im_hafen = verschneide_mit_hafen(solar['gebaeude'], hafen, "Gebäude")
-    dach_im_hafen = None
-    if solar.get('dachseiten') is not None:
-        dach_im_hafen = verschneide_mit_hafen(solar['dachseiten'], hafen, "Dachseiten")
-
-    # 7. Abschluss
-    if geb_im_hafen is not None and len(geb_im_hafen) > 0:
-        log(f"Erfolg: {len(geb_im_hafen)} Gebäude im Hafen gefunden.")
-    else:
-        log("Verschneidung ergab 0. Bitte Testkarte prüfen!", "WARN")
-        log("Tipp: Nutzen Sie ggf. einen Puffer auf die Hafengrenze (z.B. buffer(10)).")
-
-    log("Analyse beendet.")
-
-if __name__ == "__main__":
-    main()
+legend_html = f'''
+<div style="position:fixed;bottom:30px;left:30px;background:white;padding:12px 16px;
+            border-radius:8px;box-shadow:2px 2px 6px grey;font-size:13px;z-index:1000;
+            font-family:Arial,sans-serif;min-width:280px;">
+    <b style="font-size:14px;">☀️ Solarpotenzial Hamburger Hafen</b><br><br>
+    🏠 Dachseiten: <b>{fmt_zahl(len(dachseiten_hafen))}</b><br>
+    📐 PV-Fläche: <b>{fmt_zahl(pv_summe)} m²</b><br>
+    ⚡ Leistung (ca.): <b>{fmt_zahl(leistung_mwp, 1)} MWp</b><br>
+    🔋 Ertrag (ca.): <b>{fmt_zahl(ertrag_gwh, 1)} GWh/Jahr</b><br>
+    <hr style="margin:8px 0;">
+    <b>Eignung Photovoltaik</b><br>
+    <span style="background:{FARBEN_DACHSEITEN[1]};padding:1px 10px;margin-right:6px;">&nbsp;</span>Eignung 1 – sehr hohe Einstrahlung<br>
+    <span style="background:{FARBEN_DACHSEITEN[2]};padding:1px 10px;margin-right:6px;">&nbsp;</span>Eignung 2 – hohe Einstrahlung<br>
+    <span style="background:{FARBEN_DACHSEITEN[3]};padding:1px 10px;margin-right:6px;">&nbsp;</span>Eignung 3 – mittlere Einstrahlung<br>
+    <span style="background:{FARBEN_DACHSEITEN[6]};padding:1px 10px;margin-right:6px;">&nbsp;</span>Eignung 6 – geringe Einstrahlung<br>
+    <span style="background:{FARBEN_DACHSEITEN[0]};padding:1px 10px;margin-right:6px;border:1px solid #ccc;">&nbsp;</span>Eignung 0 – Datenqualität unzureichend<br>
+    <span style="background:{FARBEN_DACHSEITEN[8]};padding:1px 10px;margin-right:6px;border:1px solid #ccc;">&nbsp;</span>Eignung 8 – kein Gebäude erkannt<br>
+    <hr style="margin:8px 0;">
+    <span style="font-size:11px;color:grey;">Quelle: WFS Solarpotenzialflächen Hamburg, LGV</span>
+</div>
+'''
+m.get_root().html.add_child(folium.Element(legend_html))
+folium.LayerControl().add_to(m)
+log("Exportiere nach Excel...")
+excel_file = excel_dateiname()
+dachseiten_hafen.drop(columns='geometry').to_excel(excel_file, index=False)
+log(f"Excel gespeichert: {excel_file}")
+out_file = "hafen_solar_analyse.html"
+m.save(out_file)
+webbrowser.open(out_file)
+log(f"Karte gespeichert: {out_file}")
