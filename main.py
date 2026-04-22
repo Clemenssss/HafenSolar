@@ -105,6 +105,23 @@ elif dachseiten.crs.to_epsg() != 25832:
 log("Bereinige Geometrien...")
 dachseiten.geometry = dachseiten.geometry.buffer(0)
 hafen.geometry = hafen.geometry.buffer(0)
+# Gesamtwerte vor Clip
+# hier schon definieren
+def col(gdf, *candidates):
+    """Ersten gefundenen Spaltennamen zurückgeben."""
+    for c in candidates:
+        for col in gdf.columns:
+            if col.lower() == c.lower():
+                return col
+    return None
+col_pv   = col(dachseiten, 'pvarea')
+col_ert  = col(dachseiten, 'ertkwha_k')
+col_eig  = col(dachseiten, 'eignung')
+
+pv_summe_ges     = dachseiten[col_pv].sum()  if col_pv  else None
+ertrag_summe_ges = dachseiten[col_ert].sum() if col_ert else None
+leistung_mwp_ges = (pv_summe_ges * 0.175 / 1000)    if pv_summe_ges else None
+ertrag_gwh_ges   = (ertrag_summe_ges / 1_000_000)    if ertrag_summe_ges else None
 # 3. Räumlicher Clip auf Hafengebiet
 log("Clippe auf Hafengebiet...")
 dachseiten_hafen = gpd.clip(dachseiten, hafen)
@@ -115,17 +132,8 @@ log(f"Verfügbare Spalten: {list(dachseiten_hafen.columns)}")
 
 # 5. Statistiken (Spaltennamen ggf. anpassen nach erstem Lauf)
 # Typische Spalten laut Metadaten: Flaeche_PV, Ertrag_ohneAufstd, Eignung_PV
-def col(gdf, *candidates):
-    """Ersten gefundenen Spaltennamen zurückgeben."""
-    for c in candidates:
-        for col in gdf.columns:
-            if col.lower() == c.lower():
-                return col
-    return None
 
-col_pv   = col(dachseiten_hafen, 'pvarea')
-col_ert  = col(dachseiten_hafen, 'ertkwha_k')
-col_eig  = col(dachseiten_hafen, 'eignung')
+
 FARBEN_DACHSEITEN = {
     1: '#d73027',  # rot       – sehr hohe Einstrahlung
     2: '#f46d43',  # orange-rot
@@ -179,20 +187,35 @@ folium.GeoJson(
     name=f"Dachseiten ({fmt_zahl(len(dachseiten_wgs))})",
     style_function=farbe_dachseite,
     tooltip=folium.GeoJsonTooltip(
-        fields=[c for c in [col_pv, col_ert, col_eig] if c],
-        aliases=["PV-Fläche [m²]", "Ertrag [kWh/a]", "Eignung PV"][:sum(1 for c in [col_pv, col_ert, col_eig] if c)]
-    ) if any([col_pv, col_ert, col_eig]) else None
+        fields=['area','aspect','aufstd','buildingid','eignung','eignung_t',
+                'ertkwp_k','ertkwp_ka','ertkwha_k','ertkwha_ka',
+                'percentms','percentmsa','power','pvarea','pvareat',
+                'roofid','schatten','schattena','slope'],
+        aliases=['Fläche Dachseite [m²]','Ausrichtung [°]','Aufständerung [0/1]',
+                 'ID Gebäude','Eignung PV','Eignung Solarthermie',
+                 'Ertrag [kWh/kWp/a] ohne Aufstd','Ertrag [kWh/kWp/a] mit Aufstd',
+                 'Ertrag [kWh/a] ohne Aufstd','Ertrag [kWh/a] mit Aufstd',
+                 'Einstrahlung ohne Aufstd [%]','Einstrahlung mit Aufstd [%]',
+                 'Power [kWp]','Fläche PV [m²]','Fläche ST [m²]',
+                 'ID Dachseite','Schatten ohne Aufstd [%/a]','Schatten mit Aufstd [%/a]',
+                 'Neigung [°]'],
+        localize=True,
+        sticky=True
+    )
 ).add_to(m)
-
+# für die legende
+hafen_flaeche_km2 = hafen.geometry.area.sum() / 1_000_000
+hamburg_flaeche_km2 = 755.2
 legend_html = f'''
 <div style="position:fixed;bottom:30px;left:30px;background:white;padding:12px 16px;
             border-radius:8px;box-shadow:2px 2px 6px grey;font-size:13px;z-index:1000;
             font-family:Arial,sans-serif;min-width:280px;">
     <b style="font-size:14px;">☀️ Solarpotenzial Hamburger Hafen</b><br><br>
-    🏠 Dachseiten: <b>{fmt_zahl(len(dachseiten_hafen))}</b><br>
-    📐 PV-Fläche: <b>{fmt_zahl(pv_summe)} m²</b><br>
-    ⚡ Leistung (ca.): <b>{fmt_zahl(leistung_mwp, 1)} MWp</b><br>
-    🔋 Ertrag (ca.): <b>{fmt_zahl(ertrag_gwh, 1)} GWh/Jahr</b><br>
+    🏠 Dachseiten: <b>{fmt_zahl(len(dachseiten_hafen))}</b> (Hamburg: {fmt_zahl(len(dachseiten))})<br>
+    📐 PV-Fläche: <b>{fmt_zahl(pv_summe)} m²</b> (Hamburg: {fmt_zahl(pv_summe_ges)} m²)<br>
+    ⚡ Leistung (ca.): <b>{fmt_zahl(leistung_mwp, 1)} MWp</b> (Hamburg: {fmt_zahl(leistung_mwp_ges, 1)} MWp)<br>
+    🔋 Ertrag (ca.): <b>{fmt_zahl(ertrag_gwh, 1)} GWh/Jahr</b> (Hamburg: {fmt_zahl(ertrag_gwh_ges, 1)} GWh/Jahr)<br>
+    📏 Hafengebiet: <b>{fmt_zahl(hafen_flaeche_km2, 1)} km²</b> (Hamburg: {fmt_zahl(hamburg_flaeche_km2, 1)} km²)<br>
     <hr style="margin:8px 0;">
     <b>Eignung Photovoltaik</b><br>
     <span style="background:{FARBEN_DACHSEITEN[1]};padding:1px 10px;margin-right:6px;">&nbsp;</span>Eignung 1 – sehr hohe Einstrahlung<br>
@@ -211,7 +234,7 @@ log("Exportiere nach Excel...")
 excel_file = excel_dateiname()
 dachseiten_hafen.drop(columns='geometry').to_excel(excel_file, index=False)
 log(f"Excel gespeichert: {excel_file}")
-out_file = "hafen_solar_analyse.html"
+out_file = "index.html"
 m.save(out_file)
 webbrowser.open(out_file)
 log(f"Karte gespeichert: {out_file}")
