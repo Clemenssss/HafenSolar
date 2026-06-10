@@ -33,7 +33,13 @@ def lade_mastr_anlagen(hafen: gpd.GeoDataFrame) -> gpd.GeoDataFrame | None:
     """
     log("Lade MaStR-Daten (PV, Hamburg)...")
 
-    db = Mastr()
+    # --- Download / DB-Initialisierung ---
+    try:
+        db = Mastr()
+        # db.download(data="solar", bulk=False, limit=None)  # nur einmalig nötig
+    except Exception as e:
+        log(f"MaStR-Download fehlgeschlagen: {e}")
+        return None, None
 
     # --- Daten aus DB lesen ---
     try:
@@ -44,17 +50,39 @@ def lade_mastr_anlagen(hafen: gpd.GeoDataFrame) -> gpd.GeoDataFrame | None:
         )
     except Exception as e:
         log(f"MaStR-Abfrage fehlgeschlagen: {e}")
+        # Fallback: vorhandene Tabellen ausgeben
         try:
             tables = pd.read_sql(
-                "SELECT name FROM sqlite_master WHERE type='table'",
+                "SELECT name FROM sqlite_master WHERE type=\'table\'",
                 con=db.engine,
             )
             log(f"Vorhandene Tabellen: {tables['name'].tolist()}")
         except Exception:
             pass
-        return None
+        return None, None
+
+    if df is None or df.empty:
+        log("Keine MaStR-Daten für Hamburg gefunden.")
+        return None, None
+
     log(f"MaStR Hamburg gesamt: {len(df)} Anlagen")
     log(f"Spalten: {list(df.columns)}")
+
+    # --- Hamburg-Gesamtstatistik (vor Koordinaten-Filter / Clip) ---
+    leistung_col = _find_col(df, ["Nettonennleistung", "InstallierteLeistung",
+                                   "nettonennleistung"])
+    kwp_hamburg_gesamt = 0.0
+    if leistung_col:
+        kwp_hamburg_gesamt = pd.to_numeric(df[leistung_col], errors="coerce").sum()
+
+    hamburg_stats = {
+        "n":          len(df),
+        "kwp_gesamt": kwp_hamburg_gesamt,
+        "gwh_gesamt": kwp_hamburg_gesamt / 1_000_000 * 950,
+    }
+    log(f"Hamburg gesamt: {hamburg_stats['n']} Anlagen, "
+        f"{hamburg_stats['kwp_gesamt']:.1f} kWp, "
+        f"{hamburg_stats['gwh_gesamt']:.1f} GWh/a")
 
     # --- Koordinaten-Spalten ermitteln ---
     lat_col = _find_col(df, ["Breitengrad", "lat", "latitude"])
@@ -63,7 +91,7 @@ def lade_mastr_anlagen(hafen: gpd.GeoDataFrame) -> gpd.GeoDataFrame | None:
 
     if not lat_col or not lon_col:
         log("FEHLER: Koordinatenspalten nicht gefunden – Abbruch.")
-        return None
+        return None, hamburg_stats
 
     # Wie viele haben überhaupt Koordinaten?
     n_vor = len(df)
@@ -75,7 +103,7 @@ def lade_mastr_anlagen(hafen: gpd.GeoDataFrame) -> gpd.GeoDataFrame | None:
 
     if df.empty:
         log("FEHLER: Keine Einträge mit Koordinaten.")
-        return None
+        return None, hamburg_stats
 
     # Stichprobe der Koordinaten zur Plausibilitätsprüfung
     log(f"Koordinaten-Stichprobe (erste 3):\n{df[[lat_col, lon_col]].head(3).to_string()}")
@@ -98,10 +126,10 @@ def lade_mastr_anlagen(hafen: gpd.GeoDataFrame) -> gpd.GeoDataFrame | None:
 
     if gdf_hafen.empty:
         log("Keine Anlagen im Hafengebiet – prüfe ob Bounds überlappen (s.o.).")
-        return None
+        return None, hamburg_stats
 
     gdf_hafen = _normalisiere_spalten(gdf_hafen)
-    return gdf_hafen
+    return gdf_hafen, hamburg_stats
 
 
 def _find_col(df: pd.DataFrame, candidates: list) -> str | None:

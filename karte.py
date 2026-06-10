@@ -78,13 +78,21 @@ def _mastr_popup_html(row) -> str:
     kwp = row.get("leistung_kwp")
     kwp_str = f"{kwp:,.1f} kWp".replace(",", ".") if kwp else "k.A."
 
+    ertrag_str = "k.A."
+    if kwp:
+        ertrag_kwh = kwp * 950
+        ertrag_str = f"{ertrag_kwh:,.0f} kWh/a".replace(",", ".")
+
     status = row.get("status_text", "unbekannt")
     farbe  = FARBE_MASTR_BETRIEB if "Betrieb" in status else FARBE_MASTR_STILL
 
-    adresse_teile = [
-        row.get("strasse"), row.get("plz"), row.get("ort")
-    ]
-    adresse = " ".join(str(t) for t in adresse_teile if t and str(t) != "nan") or "k.A."
+    strasse = row.get("strasse")
+    plz_ort = " ".join(str(t) for t in [row.get("plz"), row.get("ort")]
+                        if t and str(t) != "nan")
+    adresse = ", ".join(t for t in [
+        str(strasse) if strasse and str(strasse) != "nan" else None,
+        plz_ort or None
+    ] if t) or "k.A."
 
     return f"""
 <div style="font-family:Arial,sans-serif;font-size:12px;min-width:220px;">
@@ -98,22 +106,24 @@ def _mastr_popup_html(row) -> str:
     <tr style="background:#f9f9f9;">
         <td style="color:#666;padding:2px 4px;">Leistung</td>
         <td style="padding:2px 4px;font-weight:bold;">{kwp_str}</td></tr>
-    <tr><td style="color:#666;padding:2px 4px;">Inbetriebnahme</td>
+    <tr><td style="color:#666;padding:2px 4px;">Jahresertrag (ca.)</td>
+        <td style="padding:2px 4px;">{ertrag_str}</td></tr>
+    <tr style="background:#f9f9f9;">
+        <td style="color:#666;padding:2px 4px;">Inbetriebnahme</td>
         <td style="padding:2px 4px;">{val('inbetriebnahme')}</td></tr>
-    <tr style="background:#f9f9f9;">
-        <td style="color:#666;padding:2px 4px;">Lage</td>
+    <tr><td style="color:#666;padding:2px 4px;">Lage</td>
         <td style="padding:2px 4px;">{val('lage')}</td></tr>
-    <tr><td style="color:#666;padding:2px 4px;">Adresse</td>
-        <td style="padding:2px 4px;">{adresse}</td></tr>
     <tr style="background:#f9f9f9;">
-        <td style="color:#666;padding:2px 4px;">MaStR-Nr.</td>
+        <td style="color:#666;padding:2px 4px;">Adresse</td>
+        <td style="padding:2px 4px;">{adresse}</td></tr>
+    <tr><td style="color:#666;padding:2px 4px;">MaStR-Nr.</td>
         <td style="padding:2px 4px;font-size:11px;">{val('mastr_id')}</td></tr>
   </table>
 </div>
 """
 
 
-def _legende(ds_stats, pp_stats, mastr_stats, hafen_km2):
+def _legende(ds_stats, pp_stats, mastr_stats, mastr_hamburg, hafen_km2):
     f = fmt_zahl
 
     park_block = ""
@@ -130,6 +140,17 @@ def _legende(ds_stats, pp_stats, mastr_stats, hafen_km2):
 
     mastr_block = ""
     if mastr_stats:
+        if mastr_hamburg:
+            n_zeile   = f'📍 Anlagen: <b>{f(mastr_stats["n"])}</b> (Hamburg: {f(mastr_hamburg["n"])})<br>'
+            kwp_zeile = (f'⚡ Installierte Leistung: <b>{f(mastr_stats["kwp_gesamt"], 1)} kWp</b> '
+                         f'(Hamburg: {f(mastr_hamburg["kwp_gesamt"], 1)} kWp)<br>')
+            gwh_zeile = (f'🔋 Ertrag (ca.): <b>{f(mastr_stats["gwh_gesamt"], 1)} GWh/Jahr</b> '
+                         f'(Hamburg: {f(mastr_hamburg["gwh_gesamt"], 1)} GWh/Jahr)<br>')
+        else:
+            n_zeile   = f'📍 Anlagen: <b>{f(mastr_stats["n"])}</b><br>'
+            kwp_zeile = f'⚡ Installierte Leistung: <b>{f(mastr_stats["kwp_gesamt"], 1)} kWp</b><br>'
+            gwh_zeile = f'🔋 Ertrag (ca.): <b>{f(mastr_stats["gwh_gesamt"], 1)} GWh/Jahr</b><br>'
+
         mastr_block = f'''
     <hr style="margin:8px 0;">
     <b>⚡ Installierte PV-Anlagen (MaStR)</b><br>
@@ -139,9 +160,10 @@ def _legende(ds_stats, pp_stats, mastr_stats, hafen_km2):
     <span style="background:{FARBE_MASTR_STILL};display:inline-block;
           width:12px;height:12px;border-radius:50%;margin-right:6px;
           vertical-align:middle;border:1px solid #888;">&nbsp;</span>Stillgelegt / Sonstige<br>
-    📍 Anlagen: <b>{f(mastr_stats["n"])}</b><br>
-    ⚡ Installierte Leistung: <b>{f(mastr_stats["kwp_gesamt"], 1)} kWp</b><br>
-    <span style="font-size:11px;color:grey;">Kreisgröße ∝ Leistung (log). Quelle: BNetzA MaStR</span>'''
+    {n_zeile}
+    {kwp_zeile}
+    {gwh_zeile}
+    <span style="font-size:11px;color:grey;">Kreisgröße ∝ Leistung (log). Annahme: 950 kWh/kWp/a. Quelle: BNetzA MaStR</span>'''
 
     return f'''
 <div style="position:fixed;bottom:30px;left:30px;background:white;padding:12px 16px;
@@ -176,11 +198,12 @@ def _mastr_stats(mastr_anlagen):
     return {
         "n":           len(mastr_anlagen),
         "kwp_gesamt":  kwp,
+        "gwh_gesamt":  kwp / 1_000_000 * 950,
     }
 
 
 def erstelle_karte(hafen, dachseiten_hafen, ds_stats, pp_stats,
-                   mastr_anlagen=None):
+                   mastr_anlagen=None, mastr_hamburg=None):
     centroid = hafen.geometry.centroid.to_crs(4326)
     center   = [centroid.y.mean(), centroid.x.mean()]
 
@@ -247,7 +270,7 @@ def erstelle_karte(hafen, dachseiten_hafen, ds_stats, pp_stats,
 
     hafen_km2 = hafen.geometry.area.sum() / 1_000_000
     m.get_root().html.add_child(
-        folium.Element(_legende(ds_stats, pp_stats, ms, hafen_km2))
+        folium.Element(_legende(ds_stats, pp_stats, ms, mastr_hamburg, hafen_km2))
     )
     folium.LayerControl().add_to(m)
     return m

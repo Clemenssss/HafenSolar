@@ -27,7 +27,7 @@ dachseiten_hafen = gpd.clip(dachseiten, hafen)
 log(f"Dachseiten im Hafen: {len(dachseiten_hafen)}")
 
 # 3. MaStR-Anlagen laden
-mastr_anlagen = lade_mastr_anlagen(hafen)
+mastr_anlagen, mastr_hamburg = lade_mastr_anlagen(hafen)
 
 # 4. Statistiken
 ds_stats = berechne_dachseiten_stats(dachseiten, dachseiten_hafen)
@@ -36,7 +36,7 @@ pp_stats = berechne_parkplatz_stats(parkplaetze)
 # 5. Karte
 log("Erstelle Karte...")
 karte = erstelle_karte(hafen, dachseiten_hafen, ds_stats, pp_stats,
-                       mastr_anlagen=mastr_anlagen)
+                       mastr_anlagen=mastr_anlagen, mastr_hamburg=mastr_hamburg)
 karte.save(OUTPUT_HTML)
 webbrowser.open(OUTPUT_HTML)
 log(f"Karte gespeichert: {OUTPUT_HTML}")
