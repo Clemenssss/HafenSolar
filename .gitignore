@@ -9,6 +9,10 @@ __pycache__/
 
 # PyCharm
 .idea/
+# master datw
+*.json
+*.iml
+*.xml
 # Ausgabedateien
 *.xlsx
 *.gpkg
