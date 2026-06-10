@@ -1,0 +1,20 @@
+# Virtuelle Python-Umgebungen
+.venv/
+venv/
+
+# Python-Cache
+__pycache__/
+*.pyc
+*.pyo
+
+# PyCharm
+.idea/
+# Ausgabedateien
+*.xlsx
+*.gpkg
+*.html
+*.zip
+
+# Betriebssystem-Dateien
+.DS_Store
+Thumbs.db
