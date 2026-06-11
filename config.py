@@ -19,18 +19,26 @@ KWH_PRO_KWP  = 950     # kWh/kWp/a
 PARK_NUTZFAKTOR = 0.80  # 80% der Parkfläche nutzbar
 
 FARBEN_DACHSEITEN = {
-    1: '#d73027',   # rot       – sehr hohe Einstrahlung
-    2: '#f46d43',   # orange-rot
-    3: '#fdae61',   # orange
-    6: '#fee090',   # gelb
-    0: '#e0e0e0',   # grau      – Datenqualität unzureichend
-    8: '#f0f0f0',   # hellgrau  – kein Gebäude erkannt
+    1: '#d73027',
+    2: '#f46d43',
+    3: '#fdae61',
+    6: '#fee090',
+    0: '#e0e0e0',
+    8: '#f0f0f0',
 }
 
 FARBE_PARKPLATZ      = "#4da6e8"
 FARBE_PARKPLATZ_RAND = "#1a6faf"
-# Diese drei Zeilen in config.py ergänzen (z.B. nach FARBE_PARKPLATZ_RAND):
 
-FARBE_MASTR_BETRIEB = "#2ecc71"  # grün  – In Betrieb
-FARBE_MASTR_STILL = "#bdc3c7"  # grau  – stillgelegt / sonstige
-FARBE_MASTR_RAND = "#1a7a3a"  # dunkelgrün – Kreisrand
+# MaStR-Farben
+FARBE_MASTR_BETRIEB = "#2ecc71"
+FARBE_MASTR_STILL   = "#bdc3c7"
+FARBE_MASTR_RAND    = "#1a7a3a"
+
+# Brach-/Gewerbeflächen-Farben
+FARBE_HALDE          = "#8d6e63"   # braun – Halden/Tagebau
+FARBE_HALDE_RAND     = "#5d4037"
+FARBE_GEWERBE_FREI   = "#9c27b0"   # lila – unbebaute Gewerbeflächen
+FARBE_GEWERBE_RAND   = "#6a1b9a"
+FARBE_BRACHE_OSM     = "#d32f2f"   # rot – OSM Brachflächen
+FARBE_BRACHE_OSM_RAND= "#7f0000"

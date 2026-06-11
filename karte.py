@@ -4,7 +4,10 @@ import folium
 
 from config import (FARBEN_DACHSEITEN, FARBE_PARKPLATZ, FARBE_PARKPLATZ_RAND,
                     HAMBURG_FLAECHE_KM2,
-                    FARBE_MASTR_BETRIEB, FARBE_MASTR_STILL, FARBE_MASTR_RAND)
+                    FARBE_MASTR_BETRIEB, FARBE_MASTR_STILL, FARBE_MASTR_RAND,
+                    FARBE_HALDE, FARBE_HALDE_RAND,
+                    FARBE_GEWERBE_FREI, FARBE_GEWERBE_RAND,
+                    FARBE_BRACHE_OSM, FARBE_BRACHE_OSM_RAND)
 from utils import fmt_zahl
 
 import math
@@ -58,6 +61,33 @@ def _tooltip_parkplaetze():
     )
 
 
+def _tooltip_halden():
+    return folium.GeoJsonTooltip(
+        fields=['nutzart', 'bez', 'flaeche_m2'],
+        aliases=['Nutzungsart', 'Bezeichnung', 'Fläche [m²]'],
+        localize=True,
+        sticky=True,
+    )
+
+
+def _tooltip_gewerbe_frei():
+    return folium.GeoJsonTooltip(
+        fields=['nutzart', 'bez', 'flaeche_m2'],
+        aliases=['Nutzungsart (umliegend)', 'Bezeichnung', 'Fläche unbebaut [m²]'],
+        localize=True,
+        sticky=True,
+    )
+
+
+def _tooltip_brache_osm():
+    return folium.GeoJsonTooltip(
+        fields=['name', 'landuse', 'flaeche_m2'],
+        aliases=['Name', 'OSM landuse', 'Fläche [m²]'],
+        localize=True,
+        sticky=True,
+    )
+
+
 def _radius_kwp(kwp, min_r=5, max_r=20):
     """Kreisradius logarithmisch skaliert nach kWp."""
     if kwp is None or kwp <= 0:
@@ -86,13 +116,10 @@ def _mastr_popup_html(row) -> str:
     status = row.get("status_text", "unbekannt")
     farbe  = FARBE_MASTR_BETRIEB if "Betrieb" in status else FARBE_MASTR_STILL
 
-    strasse = row.get("strasse")
-    plz_ort = " ".join(str(t) for t in [row.get("plz"), row.get("ort")]
-                        if t and str(t) != "nan")
-    adresse = ", ".join(t for t in [
-        str(strasse) if strasse and str(strasse) != "nan" else None,
-        plz_ort or None
-    ] if t) or "k.A."
+    adresse_teile = [
+        row.get("strasse"), row.get("plz"), row.get("ort")
+    ]
+    adresse = " ".join(str(t) for t in adresse_teile if t and str(t) != "nan") or "k.A."
 
     return f"""
 <div style="font-family:Arial,sans-serif;font-size:12px;min-width:220px;">
@@ -108,22 +135,23 @@ def _mastr_popup_html(row) -> str:
         <td style="padding:2px 4px;font-weight:bold;">{kwp_str}</td></tr>
     <tr><td style="color:#666;padding:2px 4px;">Jahresertrag (ca.)</td>
         <td style="padding:2px 4px;">{ertrag_str}</td></tr>
-    <tr style="background:#f9f9f9;">
-        <td style="color:#666;padding:2px 4px;">Inbetriebnahme</td>
+    <tr><td style="color:#666;padding:2px 4px;">Inbetriebnahme</td>
         <td style="padding:2px 4px;">{val('inbetriebnahme')}</td></tr>
-    <tr><td style="color:#666;padding:2px 4px;">Lage</td>
-        <td style="padding:2px 4px;">{val('lage')}</td></tr>
     <tr style="background:#f9f9f9;">
-        <td style="color:#666;padding:2px 4px;">Adresse</td>
+        <td style="color:#666;padding:2px 4px;">Lage</td>
+        <td style="padding:2px 4px;">{val('lage')}</td></tr>
+    <tr><td style="color:#666;padding:2px 4px;">Adresse</td>
         <td style="padding:2px 4px;">{adresse}</td></tr>
-    <tr><td style="color:#666;padding:2px 4px;">MaStR-Nr.</td>
+    <tr style="background:#f9f9f9;">
+        <td style="color:#666;padding:2px 4px;">MaStR-Nr.</td>
         <td style="padding:2px 4px;font-size:11px;">{val('mastr_id')}</td></tr>
   </table>
 </div>
 """
 
 
-def _legende(ds_stats, pp_stats, mastr_stats, mastr_hamburg, hafen_km2):
+def _legende(ds_stats, pp_stats, mastr_stats, mastr_hamburg, hafen_km2,
+              halden_stats=None, gewerbe_stats=None, brache_stats=None):
     f = fmt_zahl
 
     park_block = ""
@@ -165,10 +193,39 @@ def _legende(ds_stats, pp_stats, mastr_stats, mastr_hamburg, hafen_km2):
     {gwh_zeile}
     <span style="font-size:11px;color:grey;">Kreisgröße ∝ Leistung (log). Annahme: 950 kWh/kWp/a. Quelle: BNetzA MaStR</span>'''
 
+    brachen_block = ""
+    if halden_stats or gewerbe_stats or brache_stats:
+        zeilen = []
+        if halden_stats:
+            zeilen.append(
+                f'<span style="background:{FARBE_HALDE};padding:1px 10px;margin-right:6px;">&nbsp;</span>'
+                f'Halden/Tagebau (ALKIS): <b>{f(halden_stats["n"])}</b> – '
+                f'{f(halden_stats["flaeche_m2"])} m²<br>'
+            )
+        if gewerbe_stats:
+            zeilen.append(
+                f'<span style="background:{FARBE_GEWERBE_FREI};padding:1px 10px;margin-right:6px;">&nbsp;</span>'
+                f'Unbebaute Gewerbeflächen (ALKIS, ≥ 500 m²): <b>{f(gewerbe_stats["n"])}</b> – '
+                f'{f(gewerbe_stats["flaeche_m2"])} m² '
+                f'({f(gewerbe_stats["flaeche_m2"]/10000, 1)} ha)<br>'
+            )
+        if brache_stats:
+            zeilen.append(
+                f'<span style="background:{FARBE_BRACHE_OSM};padding:1px 10px;margin-right:6px;">&nbsp;</span>'
+                f'Brachflächen (OSM): <b>{f(brache_stats["n"])}</b> – '
+                f'{f(brache_stats["flaeche_m2"])} m²<br>'
+            )
+        brachen_block = f'''
+    <hr style="margin:8px 0;">
+    <b>🏗️ Brach- und ungenutzte Flächen</b><br>
+    {"".join(zeilen)}
+    <span style="font-size:11px;color:grey;">ALKIS Tatsächliche Nutzung (LGV) + OpenStreetMap. "Unbebaute Gewerbeflächen" = Industrie/Gewerbe-Parzellen minus Gebäude-Footprint, kann auch Lager-/Stellflächen enthalten.</span>'''
+
     return f'''
 <div style="position:fixed;bottom:30px;left:30px;background:white;padding:12px 16px;
             border-radius:8px;box-shadow:2px 2px 6px grey;font-size:13px;z-index:1000;
-            font-family:Arial,sans-serif;min-width:280px;">
+            font-family:Arial,sans-serif;min-width:280px;max-width:320px;
+            word-wrap:break-word;max-height:80vh;overflow-y:auto;">
     <b style="font-size:14px;">☀️ Solarpotenzial Hamburger Hafen</b><br><br>
     🏠 Dachseiten: <b>{f(ds_stats["n_hafen"])}</b> (Hamburg: {f(ds_stats["n_gesamt"])})<br>
     📐 PV-Fläche: <b>{f(ds_stats["pv_hafen"])} m²</b> (Hamburg: {f(ds_stats["pv_gesamt"])} m²)<br>
@@ -185,8 +242,9 @@ def _legende(ds_stats, pp_stats, mastr_stats, mastr_hamburg, hafen_km2):
     <span style="background:{FARBEN_DACHSEITEN[8]};padding:1px 10px;margin-right:6px;border:1px solid #ccc;">&nbsp;</span>Eignung 8 – kein Gebäude erkannt<br>
     {park_block}
     {mastr_block}
+    {brachen_block}
     <hr style="margin:8px 0;">
-    <span style="font-size:11px;color:grey;">Quellen: WFS Solarpotenzialflächen Hamburg (LGV), OpenStreetMap, MaStR (BNetzA)</span>
+    <span style="font-size:11px;color:grey;">Quellen: WFS Solarpotenzialflächen Hamburg (LGV), OpenStreetMap, MaStR (BNetzA), ALKIS (LGV)</span>
 </div>
 '''
 
@@ -203,7 +261,8 @@ def _mastr_stats(mastr_anlagen):
 
 
 def erstelle_karte(hafen, dachseiten_hafen, ds_stats, pp_stats,
-                   mastr_anlagen=None, mastr_hamburg=None):
+                   mastr_anlagen=None, mastr_hamburg=None,
+                   halden=None, gewerbe_frei=None, brache_osm=None):
     centroid = hafen.geometry.centroid.to_crs(4326)
     center   = [centroid.y.mean(), centroid.x.mean()]
 
@@ -268,9 +327,67 @@ def erstelle_karte(hafen, dachseiten_hafen, ds_stats, pp_stats,
 
         fg.add_to(m)
 
+    # Layer: Halden / Tagebau (ALKIS) – "enge" Brachen
+    halden_stats = None
+    if halden is not None and not halden.empty:
+        halden_stats = {
+            "n":          len(halden),
+            "flaeche_m2": halden["flaeche_m2"].sum(),
+        }
+        folium.GeoJson(
+            halden.to_crs(4326),
+            name=f"Halden/Tagebau ALKIS ({halden_stats['n']})",
+            style_function=lambda x: {
+                "color":       FARBE_HALDE_RAND,
+                "fillColor":   FARBE_HALDE,
+                "weight":      1,
+                "fillOpacity": 0.6,
+            },
+            tooltip=_tooltip_halden(),
+        ).add_to(m)
+
+    # Layer: Unbebaute Gewerbeflächen (ALKIS minus Gebäude)
+    gewerbe_stats = None
+    if gewerbe_frei is not None and not gewerbe_frei.empty:
+        gewerbe_stats = {
+            "n":          len(gewerbe_frei),
+            "flaeche_m2": gewerbe_frei["flaeche_m2"].sum(),
+        }
+        folium.GeoJson(
+            gewerbe_frei.to_crs(4326),
+            name=f"Unbebaute Gewerbeflächen ALKIS ({gewerbe_stats['n']})",
+            style_function=lambda x: {
+                "color":       FARBE_GEWERBE_RAND,
+                "fillColor":   FARBE_GEWERBE_FREI,
+                "weight":      1,
+                "fillOpacity": 0.45,
+            },
+            tooltip=_tooltip_gewerbe_frei(),
+        ).add_to(m)
+
+    # Layer: Brachflächen (OSM)
+    brache_stats = None
+    if brache_osm is not None and not brache_osm.empty:
+        brache_stats = {
+            "n":          len(brache_osm),
+            "flaeche_m2": brache_osm["flaeche_m2"].sum(),
+        }
+        folium.GeoJson(
+            brache_osm.to_crs(4326),
+            name=f"Brachflächen OSM ({brache_stats['n']})",
+            style_function=lambda x: {
+                "color":       FARBE_BRACHE_OSM_RAND,
+                "fillColor":   FARBE_BRACHE_OSM,
+                "weight":      1,
+                "fillOpacity": 0.5,
+            },
+            tooltip=_tooltip_brache_osm(),
+        ).add_to(m)
+
     hafen_km2 = hafen.geometry.area.sum() / 1_000_000
     m.get_root().html.add_child(
-        folium.Element(_legende(ds_stats, pp_stats, ms, mastr_hamburg, hafen_km2))
+        folium.Element(_legende(ds_stats, pp_stats, ms, mastr_hamburg, hafen_km2,
+                                halden_stats, gewerbe_stats, brache_stats))
     )
     folium.LayerControl().add_to(m)
     return m
